@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
   ReceiverState,
-  ReceiverConfig,
   LogEntry,
   TransferMeta,
 } from '../../types/transfer';
@@ -21,8 +20,10 @@ import {
   Download,
   Share2,
   RefreshCw,
-  Eye,
-  Radio,
+  Gauge,
+  Zap,
+  Activity,
+  Layers,
 } from 'lucide-react';
 
 const DEFAULT_RECEIVER_STATE: ReceiverState = {
@@ -59,11 +60,16 @@ const DEFAULT_RECEIVER_STATE: ReceiverState = {
   },
 };
 
-export const ReceiverView: React.FC = () => {
+interface ReceiverViewProps {
+  onNotify?: (type: 'success' | 'error' | 'warning' | 'info', title: string, message: string) => void;
+}
+
+export const ReceiverView: React.FC<ReceiverViewProps> = ({ onNotify }) => {
   const [state, setState] = useState<ReceiverState>(DEFAULT_RECEIVER_STATE);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [cameraActive, setCameraActive] = useState<boolean>(false);
   const [instantSpeedKb, setInstantSpeedKb] = useState<number>(0);
+  const [peakSpeedKb, setPeakSpeedKb] = useState<number>(0);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const hiddenCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -87,7 +93,8 @@ export const ReceiverView: React.FC = () => {
         addLog('info', 'Optical camera initialized. Scanning for QR stream...');
       }
     } catch (err: any) {
-      addLog('error', `Camera access denied or unavailable: ${err.message}`);
+      addLog('error', `Camera access denied: ${err.message}`);
+      onNotify?.('error', 'Camera Error', 'Could not open camera sensor. Please check browser permissions.');
     }
   };
 
@@ -166,6 +173,7 @@ export const ReceiverView: React.FC = () => {
           startTime: Date.now(),
         }));
         addLog('info', `Detected optical stream: ${meta.name} (${formatBytes(meta.size)})`);
+        onNotify?.('info', 'Incoming Stream Detected', `Receiving "${meta.name}" (${meta.totalChunks} chunks). Keep camera focused.`);
       }
     }
 
@@ -183,7 +191,9 @@ export const ReceiverView: React.FC = () => {
         const elapsedSec = Math.max(0.1, (Date.now() - (state.startTime || Date.now())) / 1000);
         const totalBytesReceived = Array.from(chunksMap.values()).reduce((acc: number, cur: Uint8Array) => acc + cur.byteLength, 0);
         const speedKb = totalBytesReceived / 1024 / elapsedSec;
+
         setInstantSpeedKb(speedKb);
+        setPeakSpeedKb((prev) => Math.max(prev, speedKb));
 
         setState((prev) => ({
           ...prev,
@@ -236,6 +246,11 @@ export const ReceiverView: React.FC = () => {
       }));
 
       addLog('success', `SHA-256 Checksum Passed! ${meta.name} ready for download.`);
+      onNotify?.(
+        'success',
+        'Transfer Complete & Verified',
+        `File "${meta.name}" successfully reconstructed with 100% SHA-256 match (${computedSha.substring(0, 10)}...).`
+      );
 
       addSessionHistoryItem({
         id: Math.random().toString(),
@@ -262,15 +277,24 @@ export const ReceiverView: React.FC = () => {
         errorMessage: 'SHA-256 Checksum Mismatch! Transmission corrupted.',
       }));
       addLog('error', `SHA-256 Checksum FAILED! Expected: ${meta.hash}, Got: ${computedSha}`);
+      onNotify?.(
+        'error',
+        'Integrity Check Failed',
+        `SHA-256 mismatch detected for "${meta.name}". The transmission was corrupted. Please re-scan from sender.`
+      );
     }
   };
 
   const resetReceiver = () => {
     setState(DEFAULT_RECEIVER_STATE);
     setInstantSpeedKb(0);
+    setPeakSpeedKb(0);
     lastScannedTextRef.current = null;
     addLog('info', 'Receiver reset to idle state.');
+    onNotify?.('info', 'Receiver Reset', 'Optical receiver ready for new incoming scan.');
   };
+
+  const progressPercent = state.totalChunks > 0 ? Math.round((state.receivedCount / state.totalChunks) * 100) : 0;
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
@@ -281,51 +305,111 @@ export const ReceiverView: React.FC = () => {
           <div className="w-full flex items-center justify-between pb-3 mb-4 border-b border-slate-800 text-xs">
             <div className="flex items-center gap-2 font-semibold text-slate-200">
               <Camera className="w-4 h-4 text-emerald-400" />
-              <span>Optical Receiver</span>
+              <span>Optical Receiver Viewfinder</span>
             </div>
             <button
               onClick={resetReceiver}
-              className="px-2 py-1 text-slate-400 hover:text-white bg-slate-950 rounded-lg border border-slate-800 flex items-center gap-1 text-xs"
+              className="px-2.5 py-1 text-slate-400 hover:text-white bg-slate-950 rounded-lg border border-slate-800 flex items-center gap-1.5 text-xs transition-colors"
             >
-              <RefreshCw className="w-3.5 h-3.5" /> Reset
+              <RefreshCw className="w-3.5 h-3.5" /> Reset Receiver
             </button>
           </div>
 
-          {/* Camera Viewfinder */}
-          <div className="relative w-full max-w-[420px] aspect-square bg-black rounded-2xl overflow-hidden border-2 border-emerald-500/40 shadow-inner flex items-center justify-center">
+          {/* Camera Viewfinder with Real-Time Speed & Progress HUD */}
+          <div className="relative w-full max-w-[440px] aspect-square bg-black rounded-2xl overflow-hidden border-2 border-emerald-500/40 shadow-2xl flex items-center justify-center">
             <video ref={videoRef} className="w-full h-full object-cover" playsInline muted />
             <canvas ref={hiddenCanvasRef} className="hidden" />
 
-            {/* Viewfinder Target Reticle */}
-            <div className="absolute inset-12 border-2 border-dashed border-emerald-400/60 rounded-xl pointer-events-none" />
+            {/* Target Reticle */}
+            <div className="absolute inset-10 border-2 border-dashed border-emerald-400/60 rounded-2xl pointer-events-none flex items-center justify-center">
+              <div className="w-8 h-8 border-t-2 border-l-2 border-emerald-400 absolute top-0 left-0 -mt-0.5 -ml-0.5 rounded-tl" />
+              <div className="w-8 h-8 border-t-2 border-r-2 border-emerald-400 absolute top-0 right-0 -mt-0.5 -mr-0.5 rounded-tr" />
+              <div className="w-8 h-8 border-b-2 border-l-2 border-emerald-400 absolute bottom-0 left-0 -mb-0.5 -ml-0.5 rounded-bl" />
+              <div className="w-8 h-8 border-b-2 border-r-2 border-emerald-400 absolute bottom-0 right-0 -mb-0.5 -mr-0.5 rounded-br" />
+            </div>
 
-            {/* Overlay */}
-            <div className="absolute bottom-2 inset-x-2 bg-slate-950/85 backdrop-blur rounded-lg px-3 py-1.5 text-[11px] font-mono flex items-center justify-between text-slate-200">
-              <span className="font-bold text-emerald-400">
-                {state.status === 'receiving'
-                  ? `CHUNKS ${state.receivedChunks.size} / ${state.totalChunks}`
-                  : 'ALIGN CAMERA WITH QR'}
-              </span>
-              <span className="text-slate-400">{instantSpeedKb.toFixed(1)} KB/s</span>
+            {/* Real-Time Speed Indicator Badge (Top Right HUD) */}
+            <div className="absolute top-3 right-3 bg-slate-950/85 backdrop-blur border border-emerald-500/40 rounded-xl px-3 py-1.5 text-right shadow-lg flex items-center gap-2">
+              <div className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse" />
+              <div>
+                <div className="text-[10px] text-slate-400 font-semibold tracking-wider uppercase flex items-center gap-1 justify-end">
+                  <Gauge className="w-3 h-3 text-emerald-400" /> Transfer Speed
+                </div>
+                <div className="text-base font-mono font-black text-emerald-400">
+                  {instantSpeedKb.toFixed(1)} <span className="text-xs font-bold text-slate-300">KB/s</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Top Left Status Badge */}
+            <div className="absolute top-3 left-3 bg-slate-950/85 backdrop-blur border border-slate-800 rounded-xl px-2.5 py-1 text-left shadow-lg">
+              <div className="text-[10px] text-slate-400 font-mono">
+                {state.status === 'receiving' ? 'BEAM STREAMING' : state.status.toUpperCase()}
+              </div>
+              <div className="text-xs font-bold text-slate-200">
+                {state.meta ? state.meta.name : 'Scanning QR...'}
+              </div>
+            </div>
+
+            {/* Bottom Progress and Chunks Overlay */}
+            <div className="absolute bottom-2 inset-x-2 bg-slate-950/90 backdrop-blur rounded-xl p-2.5 text-[11px] font-mono border border-slate-800/80 shadow-2xl flex flex-col gap-1.5">
+              <div className="flex items-center justify-between text-slate-200">
+                <span className="font-bold text-emerald-400 flex items-center gap-1.5">
+                  <Layers className="w-3.5 h-3.5" />
+                  {state.status === 'receiving'
+                    ? `CHUNKS ${state.receivedChunks.size} / ${state.totalChunks}`
+                    : 'POINT CAMERA AT SENDER'}
+                </span>
+                <span className="text-slate-300 font-bold">{progressPercent}%</span>
+              </div>
+
+              {/* Progress Bar */}
+              <div className="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden">
+                <div
+                  className="bg-gradient-to-r from-emerald-500 to-cyan-400 h-full transition-all duration-200 rounded-full"
+                  style={{ width: `${progressPercent}%` }}
+                />
+              </div>
+
+              <div className="flex items-center justify-between text-[10px] text-slate-400 pt-0.5">
+                <span>Peak: {peakSpeedKb.toFixed(1)} KB/s</span>
+                <span>{state.bytesReceived > 0 ? formatBytes(state.bytesReceived) : '0 KB'}</span>
+              </div>
             </div>
           </div>
 
           {/* Download Box */}
           {state.status === 'completed' && state.reconstructedUrl && (
-            <div className="w-full mt-4 p-4 bg-emerald-950/40 border border-emerald-500/40 rounded-xl flex items-center justify-between">
+            <div className="w-full mt-4 p-4 bg-emerald-950/50 border border-emerald-500/60 rounded-xl flex items-center justify-between shadow-xl">
               <div>
                 <div className="flex items-center gap-1.5 text-emerald-400 font-bold text-xs">
-                  <CheckCircle className="w-4 h-4" /> Transfer Verified (SHA-256 Match)
+                  <CheckCircle className="w-4 h-4" /> Transfer Verified (SHA-256 Valid)
                 </div>
-                <div className="text-xs text-slate-300 mt-0.5">{state.meta?.name}</div>
+                <div className="text-xs text-slate-200 mt-0.5 font-semibold">{state.meta?.name}</div>
+                <div className="text-[10px] text-slate-400 font-mono">
+                  {formatBytes(state.meta?.size || 0)} • SHA-256: {state.computedHash?.substring(0, 14)}...
+                </div>
               </div>
               <a
                 href={state.reconstructedUrl}
                 download={state.meta?.name || 'airqr_download'}
-                className="px-4 py-2 bg-emerald-400 hover:bg-emerald-300 text-slate-950 font-bold rounded-lg text-xs flex items-center gap-1.5 shadow"
+                className="px-4 py-2 bg-emerald-400 hover:bg-emerald-300 text-slate-950 font-bold rounded-xl text-xs flex items-center gap-1.5 shadow-lg shadow-emerald-400/25 transition-all"
               >
                 <Download className="w-3.5 h-3.5" /> Save File
               </a>
+            </div>
+          )}
+
+          {/* Integrity Error Box */}
+          {state.status === 'error' && (
+            <div className="w-full mt-4 p-4 bg-rose-950/50 border border-rose-500/60 rounded-xl flex items-center gap-3 shadow-xl">
+              <AlertCircle className="w-6 h-6 text-rose-400 shrink-0" />
+              <div className="text-xs">
+                <div className="font-bold text-rose-400">Cryptographic Checksum Mismatch</div>
+                <div className="text-slate-300 mt-0.5">
+                  The received data failed SHA-256 validation. Please reset and request sender to resend at a lower FPS.
+                </div>
+              </div>
             </div>
           )}
         </div>

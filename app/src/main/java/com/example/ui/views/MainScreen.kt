@@ -44,8 +44,10 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.ui.components.AppToast
 import com.example.ui.components.DocumentationDialog
 import com.example.ui.components.HistoryDialog
+import com.example.ui.components.ToastHost
 import com.example.ui.theme.Cyan400
 import com.example.ui.theme.Cyan900
 import com.example.ui.theme.Emerald400
@@ -73,6 +75,7 @@ fun MainScreen() {
     var showDocsDialog by remember { mutableStateOf(false) }
     var showHistoryDialog by remember { mutableStateOf(false) }
     var historyItems by remember { mutableStateOf(historyRepo.getHistory()) }
+    var currentToast by remember { mutableStateOf<AppToast?>(null) }
 
     Scaffold(
         containerColor = Slate950,
@@ -228,10 +231,24 @@ fun MainScreen() {
                 .background(Slate950)
         ) {
             when (currentMode) {
-                AirMode.SENDER -> SenderScreen(historyRepo = historyRepo)
-                AirMode.RECEIVER -> ReceiverScreen(historyRepo = historyRepo)
-                AirMode.LOOPBACK -> LoopbackScreen(historyRepo = historyRepo)
+                AirMode.SENDER -> SenderScreen(
+                    historyRepo = historyRepo,
+                    onNotify = { currentToast = it }
+                )
+                AirMode.RECEIVER -> ReceiverScreen(
+                    historyRepo = historyRepo,
+                    onNotify = { currentToast = it }
+                )
+                AirMode.LOOPBACK -> LoopbackScreen(
+                    historyRepo = historyRepo
+                )
             }
+
+            // Toast overlay
+            ToastHost(
+                toast = currentToast,
+                onDismiss = { currentToast = null }
+            )
         }
     }
 

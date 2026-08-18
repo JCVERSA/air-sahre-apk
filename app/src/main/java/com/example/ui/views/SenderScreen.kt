@@ -1,6 +1,5 @@
 package com.example.ui.views
 
-import android.content.Context
 import android.graphics.Bitmap
 import android.net.Uri
 import android.provider.OpenableColumns
@@ -10,6 +9,7 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -24,56 +24,39 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Cached
 import androidx.compose.material.icons.filled.ChevronLeft
 import androidx.compose.material.icons.filled.ChevronRight
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.CloudUpload
-import androidx.compose.material.icons.filled.Contrast
-import androidx.compose.material.icons.filled.FileOpen
-import androidx.compose.material.icons.filled.FilterList
-import androidx.compose.material.icons.filled.Fullscreen
-import androidx.compose.material.icons.filled.FullscreenExit
+import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.Gauge
+import androidx.compose.material.icons.filled.HourglassEmpty
+import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Radio
+import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Tune
-import androidx.compose.material.icons.filled.UploadFile
+import androidx.compose.material.icons.filled.Upload
 import androidx.compose.material.icons.filled.WifiOff
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
-import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
-import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableDoubleStateOf
 import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -89,23 +72,21 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
 import com.example.model.ChunkPayload
 import com.example.model.LogEntry
-import com.example.model.OpticalFeedbackPayload
-import com.example.model.QrDensityPreset
 import com.example.model.SenderConfig
 import com.example.model.SessionHistoryItem
 import com.example.model.TransferMeta
+import com.example.ui.components.AppToast
 import com.example.ui.components.ChunkMap
 import com.example.ui.components.EventLogList
+import com.example.ui.components.ToastType
 import com.example.ui.theme.Cyan400
 import com.example.ui.theme.Cyan900
 import com.example.ui.theme.Emerald400
 import com.example.ui.theme.Purple400
-import com.example.ui.theme.Red500
 import com.example.ui.theme.Slate100
+import com.example.ui.theme.Slate300
 import com.example.ui.theme.Slate400
 import com.example.ui.theme.Slate700
 import com.example.ui.theme.Slate800
@@ -122,35 +103,44 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.InputStream
 import java.util.UUID
 
-@OptIn(ExperimentalMaterial3Api::class)
+data class FilePreviewInfo(
+    val name: String,
+    val size: Long,
+    val type: String,
+    val sha256: String,
+    val estChunks: Int,
+    val estDurationSec: Int,
+    val rawBytes: ByteArray
+)
+
+val FPS_PRESETS = listOf(
+    Pair("6 FPS", "High Reliability" to 6),
+    Pair("12 FPS", "Balanced" to 12),
+    Pair("16 FPS", "High Speed" to 16),
+    Pair("24 FPS", "Turbo" to 24)
+)
+
 @Composable
 fun SenderScreen(
     historyRepo: HistoryRepository,
+    onNotify: (AppToast) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
     var config by remember { mutableStateOf(SenderConfig()) }
-    var selectedFileUri by remember { mutableStateOf<Uri?>(null) }
-    var fileName by remember { mutableStateOf("sample_document.txt") }
-    var fileBytes by remember { mutableStateOf<ByteArray?>(null) }
     var meta by remember { mutableStateOf<TransferMeta?>(null) }
-    var encodedPackets by remember { mutableStateOf<List<String>>(emptyList()) }
-    var preRenderedBitmaps by remember { mutableStateOf<List<Bitmap>>(emptyList()) }
-    var isProcessing by remember { mutableStateOf(false) }
-    var processProgress by remember { mutableDoubleStateOf(0.0) }
-
+    var pendingPreview by remember { mutableStateOf<FilePreviewInfo?>(null) }
+    var qrBitmaps by remember { mutableStateOf<List<Bitmap>>(emptyList()) }
+    var packets by remember { mutableStateOf<List<String>>(emptyList()) }
     var currentFrameIndex by remember { mutableIntStateOf(0) }
     var isPlaying by remember { mutableStateOf(true) }
-    var isFullscreen by remember { mutableStateOf(false) }
+    var isProcessing by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
-    var priorityMissingInput by remember { mutableStateOf("") }
-    var priorityChunksOnly by remember { mutableStateOf(false) }
-    var priorityChunkList by remember { mutableStateOf<List<Int>>(emptyList()) }
-
     val logs = remember { mutableStateListOf<LogEntry>() }
 
     fun addLog(level: String, msg: String) {
@@ -158,34 +148,15 @@ fun SenderScreen(
         if (logs.size > 50) logs.removeLast()
     }
 
-    // Default sample data loader
-    LaunchedEffect(Unit) {
-        if (fileBytes == null) {
-            val sampleText = """
-                AirQR Optical Protocol V2 Payload
-                =================================
-                This is a secure air-gapped file transfer beamed across screens via high-density Base45 optical QR codes.
-                RFC 9285 Base45 + GZIP Compression + Cryptographic SHA-256 Checksum Verification.
-                Zero RF emissions, 100% offline peer-to-peer visual communication.
-                Designed for high security air-gapped data transfers.
-            """.trimIndent().toByteArray()
-            fileBytes = sampleText
-            fileName = "airqr_sample_memo.txt"
-        }
-    }
+    fun prepareStream(preview: FilePreviewInfo) {
+        isProcessing = true
+        addLog("info", "Encoding payload: ${preview.name} (${CryptoUtil.formatBytes(preview.size)})")
 
-    // Process file whenever fileBytes or config changes
-    fun prepareStream(bytes: ByteArray, name: String) {
         scope.launch(Dispatchers.Default) {
-            isProcessing = true
-            processProgress = 0.1
-            addLog("info", "Encoding payload: $name (${CryptoUtil.formatBytes(bytes.size.toLong())})")
-
-            val sha256 = CryptoUtil.computeSHA256(bytes)
             val (dataToChunk, wasCompressed) = if (config.useCompression) {
-                GzipUtil.compress(bytes)
+                GzipUtil.compress(preview.rawBytes)
             } else {
-                Pair(bytes, false)
+                Pair(preview.rawBytes, false)
             }
 
             val chunkSize = config.chunkSize
@@ -197,84 +168,88 @@ fun SenderScreen(
                 offset = end
             }
 
-            val totalChunks = rawChunks.size
             val transferId = CryptoUtil.generateTransferId()
-
             val transferMeta = TransferMeta(
                 id = transferId,
-                name = name,
-                size = bytes.size.toLong(),
-                type = "text/plain",
-                totalChunks = totalChunks,
+                name = preview.name,
+                size = preview.size,
+                type = preview.type,
+                totalChunks = rawChunks.size,
                 chunkSize = chunkSize,
-                hash = sha256,
+                hash = preview.sha256,
                 compressed = wasCompressed,
                 compressedSize = dataToChunk.size.toLong(),
                 encoding = config.encodingMode
             )
 
-            // Generate packets
-            val packets = mutableListOf<String>()
-            val metaString = AirProtocol.encodeMetaPacket(transferMeta)
+            val packetList = mutableListOf<String>()
+            val metaStr = AirProtocol.encodeMetaPacket(transferMeta)
+            packetList.add(metaStr)
 
-            for (i in 0 until totalChunks) {
+            for (i in rawChunks.indices) {
                 val chunkData = if (config.encodingMode == "base45") {
                     Base45.encode(rawChunks[i])
                 } else {
                     CryptoUtil.toBase64(rawChunks[i])
                 }
+
                 val chunkPayload = ChunkPayload(
                     id = transferId,
                     index = i,
-                    total = totalChunks,
+                    total = rawChunks.size,
                     data = chunkData,
                     encoding = config.encodingMode
                 )
-                val chunkString = AirProtocol.encodeChunkPacket(chunkPayload)
 
-                // Interleave metadata packet periodically
                 if (i % config.metaFrequency == 0) {
-                    packets.add(metaString)
+                    packetList.add(metaStr)
                 }
-                packets.add(chunkString)
+                packetList.add(AirProtocol.encodeChunkPacket(chunkPayload))
             }
+            packetList.add(metaStr)
 
-            // Always add meta at end
-            packets.add(metaString)
-
-            // Pre-render Bitmaps for smooth playback
-            val bitmaps = mutableListOf<Bitmap>()
-            for (p in packets) {
-                val bmp = QrCodeUtil.generateQrBitmap(
-                    content = p,
-                    size = 512,
-                    ecc = config.errorCorrection,
-                    invertColor = config.invertColor
+            val bitmaps = packetList.map { pkt ->
+                QrCodeUtil.generateQrBitmap(
+                    content = pkt,
+                    size = config.qrSize,
+                    eccLevel = config.errorCorrection,
+                    invert = config.invertColor
                 )
-                bitmaps.add(bmp)
             }
 
             withContext(Dispatchers.Main) {
                 meta = transferMeta
-                encodedPackets = packets
-                preRenderedBitmaps = bitmaps
+                packets = packetList
+                qrBitmaps = bitmaps
                 currentFrameIndex = 0
+                isPlaying = true
                 isProcessing = false
-                addLog("success", "Stream prepared: $totalChunks chunks (${packets.size} optical frames)")
+                addLog("success", "Stream active: ${rawChunks.size} chunks (${packetList.size} frames)")
+
+                onNotify(
+                    AppToast(
+                        type = ToastType.SUCCESS,
+                        title = "Optical Stream Active",
+                        message = "Transmitting \"${preview.name}\" (${rawChunks.size} chunks at ${config.fps} FPS)."
+                    )
+                )
+
+                val duration = (rawChunks.size.toDouble() / config.fps.toDouble()).coerceAtLeast(0.1)
+                val avgSpeed = (preview.size / 1024.0) / duration
 
                 historyRepo.addItem(
                     SessionHistoryItem(
                         id = UUID.randomUUID().toString(),
                         transferId = transferId,
-                        fileName = name,
-                        fileSize = bytes.size.toLong(),
-                        fileType = "application/octet-stream",
+                        fileName = preview.name,
+                        fileSize = preview.size,
+                        fileType = preview.type,
                         role = "sent",
                         timestamp = System.currentTimeMillis(),
-                        hash = sha256,
-                        totalChunks = totalChunks,
-                        durationSeconds = totalChunks.toDouble() / config.fps.coerceAtLeast(1),
-                        averageSpeedKb = (bytes.size / 1024.0) / (totalChunks.toDouble() / config.fps.coerceAtLeast(1)).coerceAtLeast(0.1),
+                        hash = preview.sha256,
+                        totalChunks = rawChunks.size,
+                        durationSeconds = duration,
+                        averageSpeedKb = avgSpeed,
                         status = "success"
                     )
                 )
@@ -282,52 +257,83 @@ fun SenderScreen(
         }
     }
 
-    LaunchedEffect(fileBytes, config.chunkSize, config.errorCorrection, config.invertColor, config.encodingMode, config.useCompression) {
-        fileBytes?.let { prepareStream(it, fileName) }
-    }
+    fun inspectFile(name: String, size: Long, type: String, bytes: ByteArray, autoStart: Boolean = false) {
+        val sha256 = CryptoUtil.computeSHA256(bytes)
+        val estChunks = (size / (config.chunkSize * 0.9)).toInt().coerceAtLeast(1)
+        val estDuration = (estChunks / config.fps).coerceAtLeast(1)
 
-    // Stream animation loop
-    LaunchedEffect(isPlaying, encodedPackets, config.fps, priorityChunksOnly, priorityChunkList) {
-        if (!isPlaying || encodedPackets.isEmpty()) return@LaunchedEffect
-        val intervalMs = (1000L / config.fps.coerceIn(1, 30))
+        val preview = FilePreviewInfo(
+            name = name,
+            size = size,
+            type = type,
+            sha256 = sha256,
+            estChunks = estChunks,
+            estDurationSec = estDuration,
+            rawBytes = bytes
+        )
+        pendingPreview = preview
 
-        while (isActive) {
-            delay(intervalMs)
-            if (encodedPackets.isNotEmpty()) {
-                currentFrameIndex = (currentFrameIndex + 1) % encodedPackets.size
-            }
+        if (autoStart) {
+            prepareStream(preview)
+        } else {
+            onNotify(
+                AppToast(
+                    type = ToastType.INFO,
+                    title = "File Metadata Ready",
+                    message = "Preview details for \"$name\" before initiating optical stream."
+                )
+            )
         }
     }
 
-    // File picker contract
-    val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
-        if (uri != null) {
-            selectedFileUri = uri
-            try {
-                var name = "file"
-                context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
-                    val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                    if (nameIndex != null && cursor.moveToFirst()) {
-                        name = cursor.getString(nameIndex) ?: "file"
+    // Default sample file initialization
+    LaunchedEffect(Unit) {
+        if (packets.isEmpty()) {
+            val sampleText = "AirQR Optical Protocol V2 Payload\n=================================\nThis is an air-gapped file transfer beamed across screens via high-density Base45 optical QR codes.\n100% offline visual communication."
+            val bytes = sampleText.toByteArray(Charsets.UTF_8)
+            inspectFile("airqr_sample_memo.txt", bytes.size.toLong(), "text/plain", bytes, autoStart = true)
+        }
+    }
+
+    val filePicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        uri?.let {
+            scope.launch(Dispatchers.IO) {
+                var fileName = "air_file.bin"
+                var fileSize = 0L
+                val mimeType = context.contentResolver.getType(it) ?: "application/octet-stream"
+
+                context.contentResolver.query(it, null, null, null, null)?.use { cursor ->
+                    val nameIdx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    val sizeIdx = cursor.getColumnIndex(OpenableColumns.SIZE)
+                    if (cursor.moveToFirst()) {
+                        if (nameIdx >= 0) fileName = cursor.getString(nameIdx)
+                        if (sizeIdx >= 0) fileSize = cursor.getLong(sizeIdx)
                     }
                 }
-                fileName = name
-                val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-                if (bytes != null) {
-                    fileBytes = bytes
+
+                val bytes = context.contentResolver.openInputStream(it)?.use { input ->
+                    input.readBytes()
+                } ?: ByteArray(0)
+
+                withContext(Dispatchers.Main) {
+                    inspectFile(fileName, if (fileSize > 0) fileSize else bytes.size.toLong(), mimeType, bytes, false)
                 }
-            } catch (e: Exception) {
-                addLog("error", "Failed to load file: ${e.message}")
             }
         }
     }
 
-    val currentBitmap = if (preRenderedBitmaps.isNotEmpty()) {
-        preRenderedBitmaps.getOrNull(currentFrameIndex.coerceIn(0, preRenderedBitmaps.size - 1))
-    } else null
-
-    val currentPacket = encodedPackets.getOrNull(currentFrameIndex.coerceIn(0, encodedPackets.size - 1))
-    val isMetaFrame = currentPacket?.startsWith("AIR2:M") == true || currentPacket?.startsWith("AIR1:M") == true
+    // Playback loop
+    LaunchedEffect(isPlaying, qrBitmaps.size, config.fps) {
+        if (isPlaying && qrBitmaps.isNotEmpty()) {
+            val delayMs = (1000L / config.fps.coerceIn(1, 30))
+            while (isActive && isPlaying) {
+                delay(delayMs)
+                currentFrameIndex = (currentFrameIndex + 1) % qrBitmaps.size
+            }
+        }
+    }
 
     Column(
         modifier = modifier
@@ -336,7 +342,7 @@ fun SenderScreen(
             .padding(16.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        // Top Toolbar
+        // Header
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -345,7 +351,7 @@ fun SenderScreen(
             Column {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(
-                        imageVector = Icons.Default.CloudUpload,
+                        imageVector = Icons.Default.Radio,
                         contentDescription = null,
                         tint = Cyan400,
                         modifier = Modifier.size(20.dp)
@@ -360,70 +366,21 @@ fun SenderScreen(
                     )
                 }
                 Text(
-                    text = "$fileName (${meta?.let { CryptoUtil.formatBytes(it.size) } ?: "0 B"})",
+                    text = "Beam animated Base45 QR codes to receiver",
                     style = MaterialTheme.typography.bodySmall.copy(color = Slate400)
                 )
             }
 
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                IconButton(onClick = { filePicker.launch("*/*") }) {
-                    Icon(imageVector = Icons.Default.FileOpen, contentDescription = "Select File", tint = Cyan400)
-                }
-                IconButton(onClick = { showSettings = !showSettings }) {
-                    Icon(imageVector = Icons.Default.Tune, contentDescription = "Config", tint = Slate100)
-                }
-                IconButton(onClick = { isFullscreen = true }) {
-                    Icon(imageVector = Icons.Default.Fullscreen, contentDescription = "Fullscreen", tint = Purple400)
-                }
-            }
-        }
-
-        Spacer(modifier = Modifier.height(12.dp))
-
-        // Preset Density Selector Pills
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            QrDensityPreset.values().take(4).forEach { preset ->
-                val isSelected = config.densityPreset == preset
-                Surface(
-                    shape = RoundedCornerShape(8.dp),
-                    color = if (isSelected) Cyan900 else Slate900,
-                    border = BorderStroke(1.dp, if (isSelected) Cyan400 else Slate800),
-                    modifier = Modifier
-                        .weight(1f)
-                        .clickable {
-                            config = config.copy(
-                                densityPreset = preset,
-                                chunkSize = preset.chunkSize,
-                                fps = preset.fps,
-                                errorCorrection = preset.ecc
-                            )
-                        }
-                ) {
-                    Column(
-                        modifier = Modifier.padding(vertical = 6.dp, horizontal = 4.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        Text(
-                            text = preset.name.replace("_", " "),
-                            style = MaterialTheme.typography.labelSmall.copy(
-                                fontSize = 9.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = if (isSelected) Cyan400 else Slate400
-                            ),
-                            maxLines = 1
-                        )
-                        Text(
-                            text = "${preset.fps} fps",
-                            style = MaterialTheme.typography.bodySmall.copy(
-                                fontSize = 8.sp,
-                                color = Slate400
-                            )
-                        )
-                    }
-                }
+            Button(
+                onClick = { filePicker.launch("*/*") },
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Cyan400,
+                    contentColor = Slate950
+                )
+            ) {
+                Icon(imageVector = Icons.Default.Upload, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("Select File", fontWeight = FontWeight.Bold)
             }
         }
 
@@ -432,10 +389,10 @@ fun SenderScreen(
         // QR Code Display Stage
         Surface(
             shape = RoundedCornerShape(16.dp),
-            color = if (config.invertColor) Color.Black else Color.White,
-            border = BorderStroke(3.dp, if (isMetaFrame) Purple400 else Cyan400),
+            color = Color.White,
+            border = BorderStroke(3.dp, Cyan400),
             modifier = Modifier
-                .fillMaxWidth(0.92f)
+                .fillMaxWidth(0.85f)
                 .aspectRatio(1f)
         ) {
             Box(
@@ -444,54 +401,50 @@ fun SenderScreen(
             ) {
                 if (isProcessing) {
                     CircularProgressIndicator(color = Cyan400)
-                } else if (currentBitmap != null) {
+                } else if (qrBitmaps.isNotEmpty() && currentFrameIndex < qrBitmaps.size) {
                     Image(
-                        bitmap = currentBitmap.asImageBitmap(),
-                        contentDescription = "AirQR Stream Code",
-                        modifier = Modifier.fillMaxSize().padding(12.dp)
+                        bitmap = qrBitmaps[currentFrameIndex].asImageBitmap(),
+                        contentDescription = "AirQR Optical Stream Frame",
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(12.dp)
                     )
-                } else {
-                    Text(
-                        text = "Loading Stream...",
-                        color = Color.Black,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
 
-                // Frame info banner overlay
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .fillMaxWidth()
-                        .background(Slate950.copy(alpha = 0.85f))
-                        .padding(vertical = 4.dp, horizontal = 8.dp)
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
+                    // Overlay indicator
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .fillMaxWidth()
+                            .background(Slate950.copy(alpha = 0.85f))
+                            .padding(vertical = 4.dp, horizontal = 8.dp)
                     ) {
-                        Text(
-                            text = if (isMetaFrame) "METADATA PACKET" else "FRAME #${currentFrameIndex + 1} / ${encodedPackets.size}",
-                            fontFamily = FontFamily.Monospace,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 11.sp,
-                            color = if (isMetaFrame) Purple400 else Cyan400
-                        )
-                        Text(
-                            text = "${config.fps} FPS • ${config.encodingMode.uppercase()}",
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 10.sp,
-                            color = Slate400
-                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            val isMeta = packets.getOrNull(currentFrameIndex)?.startsWith("AIR2:M") == true
+                            Text(
+                                text = if (isMeta) "META PACKET" else "FRAME #${currentFrameIndex + 1}/${packets.size}",
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 11.sp,
+                                color = if (isMeta) Purple400 else Cyan400
+                            )
+                            Text(
+                                text = "${config.fps} FPS • BASE45",
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 10.sp,
+                                color = Slate400
+                            )
+                        }
                     }
                 }
             }
         }
 
-        Spacer(modifier = Modifier.height(14.dp))
+        Spacer(modifier = Modifier.height(12.dp))
 
-        // Playback Controls
+        // Speed (FPS) Presets Selector
         Surface(
             shape = RoundedCornerShape(12.dp),
             color = Slate900,
@@ -499,61 +452,132 @@ fun SenderScreen(
             modifier = Modifier.fillMaxWidth()
         ) {
             Column(modifier = Modifier.padding(12.dp)) {
-                // Slider
-                if (encodedPackets.isNotEmpty()) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(imageVector = Icons.Default.Gauge, contentDescription = null, tint = Cyan400, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "Stream Speed (FPS)",
+                            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold, color = Slate300)
+                        )
+                    }
+                    Text(
+                        text = "${config.fps} FPS",
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.Bold,
+                        color = Cyan400
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    FPS_PRESETS.forEach { (label, pair) ->
+                        val (desc, targetFps) = pair
+                        val isSelected = config.fps == targetFps
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = if (isSelected) Cyan400 else Slate950,
+                            border = BorderStroke(1.dp, if (isSelected) Cyan400 else Slate800),
+                            modifier = Modifier
+                                .weight(1f)
+                                .clickable {
+                                    config = config.copy(fps = targetFps)
+                                    onNotify(
+                                        AppToast(
+                                            type = ToastType.INFO,
+                                            title = "Speed Adjusted",
+                                            message = "Transmitter set to $label ($desc)."
+                                        )
+                                    )
+                                }
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(vertical = 6.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                Text(
+                                    text = label,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 11.sp,
+                                    color = if (isSelected) Slate950 else Slate100
+                                )
+                                Text(
+                                    text = desc,
+                                    fontSize = 8.sp,
+                                    color = if (isSelected) Slate950.copy(alpha = 0.8f) else Slate400
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(10.dp))
+
+        // Playback Bar
+        Surface(
+            shape = RoundedCornerShape(12.dp),
+            color = Slate900,
+            border = BorderStroke(1.dp, Slate800),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(modifier = Modifier.padding(12.dp)) {
+                if (packets.isNotEmpty()) {
                     Slider(
                         value = currentFrameIndex.toFloat(),
-                        onValueChange = {
-                            currentFrameIndex = it.toInt().coerceIn(0, encodedPackets.size - 1)
-                        },
-                        valueRange = 0f..(encodedPackets.size - 1).toFloat(),
-                        colors = SliderDefaults.colors(
-                            thumbColor = Cyan400,
-                            activeTrackColor = Cyan400,
-                            inactiveTrackColor = Slate800
-                        )
+                        onValueChange = { currentFrameIndex = it.toInt().coerceIn(0, packets.size - 1) },
+                        valueRange = 0f..(packets.size - 1).toFloat(),
+                        colors = SliderDefaults.colors(thumbColor = Cyan400, activeTrackColor = Cyan400)
                     )
                 }
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    IconButton(
-                        onClick = {
-                            if (encodedPackets.isNotEmpty()) {
-                                currentFrameIndex = (currentFrameIndex - 1 + encodedPackets.size) % encodedPackets.size
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        IconButton(onClick = {
+                            if (packets.isNotEmpty()) {
+                                currentFrameIndex = (currentFrameIndex - 1 + packets.size) % packets.size
                             }
+                        }) {
+                            Icon(imageVector = Icons.Default.ChevronLeft, contentDescription = "Prev", tint = Slate300)
                         }
-                    ) {
-                        Icon(imageVector = Icons.Default.ChevronLeft, contentDescription = "Prev", tint = Slate100)
+
+                        Button(
+                            onClick = { isPlaying = !isPlaying },
+                            colors = ButtonDefaults.buttonColors(containerColor = Cyan400, contentColor = Slate950)
+                        ) {
+                            Icon(
+                                imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(if (isPlaying) "Pause" else "Play", fontWeight = FontWeight.Bold)
+                        }
+
+                        IconButton(onClick = {
+                            if (packets.isNotEmpty()) {
+                                currentFrameIndex = (currentFrameIndex + 1) % packets.size
+                            }
+                        }) {
+                            Icon(imageVector = Icons.Default.ChevronRight, contentDescription = "Next", tint = Slate300)
+                        }
                     }
 
-                    Button(
-                        onClick = { isPlaying = !isPlaying },
-                        shape = CircleShape,
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = if (isPlaying) Purple400 else Cyan400,
-                            contentColor = Slate950
-                        ),
-                        modifier = Modifier.size(54.dp)
-                    ) {
-                        Icon(
-                            imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                            contentDescription = if (isPlaying) "Pause" else "Play",
-                            modifier = Modifier.size(28.dp)
-                        )
-                    }
-
-                    IconButton(
-                        onClick = {
-                            if (encodedPackets.isNotEmpty()) {
-                                currentFrameIndex = (currentFrameIndex + 1) % encodedPackets.size
-                            }
-                        }
-                    ) {
-                        Icon(imageVector = Icons.Default.ChevronRight, contentDescription = "Next", tint = Slate100)
+                    IconButton(onClick = { showSettings = !showSettings }) {
+                        Icon(imageVector = Icons.Default.Tune, contentDescription = "Settings", tint = Slate400)
                     }
                 }
             }
@@ -561,136 +585,164 @@ fun SenderScreen(
 
         Spacer(modifier = Modifier.height(14.dp))
 
-        // Matrix Chunk Map
+        // File Metadata Preview Card
+        pendingPreview?.let { prev ->
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = Slate900,
+                border = BorderStroke(1.dp, Cyan400.copy(alpha = 0.6f)),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(imageVector = Icons.Default.Description, contentDescription = null, tint = Cyan400, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "File Metadata Preview",
+                                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold, color = Slate100)
+                            )
+                        }
+                        Surface(
+                            shape = RoundedCornerShape(4.dp),
+                            color = Cyan400.copy(alpha = 0.15f),
+                            border = BorderStroke(1.dp, Cyan400.copy(alpha = 0.4f))
+                        ) {
+                            Text(
+                                text = prev.type.split("/").lastOrNull()?.uppercase() ?: "FILE",
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 10.sp,
+                                color = Cyan400,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = Slate950,
+                        border = BorderStroke(1.dp, Slate800),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(8.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text("File Name", color = Slate400, fontSize = 11.sp)
+                            Text(prev.name, color = Slate100, fontWeight = FontWeight.SemiBold, fontSize = 11.sp)
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(6.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = Slate950,
+                            border = BorderStroke(1.dp, Slate800),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Column(modifier = Modifier.padding(8.dp)) {
+                                Text("Payload Size", color = Slate400, fontSize = 10.sp)
+                                Text(CryptoUtil.formatBytes(prev.size), color = Slate100, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                            }
+                        }
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = Slate950,
+                            border = BorderStroke(1.dp, Slate800),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Column(modifier = Modifier.padding(8.dp)) {
+                                Text("Est. Duration", color = Slate400, fontSize = 10.sp)
+                                Text("~${prev.estDurationSec}s (${prev.estChunks} chunks)", color = Purple400, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(6.dp))
+
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = Slate950,
+                        border = BorderStroke(1.dp, Slate800),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(modifier = Modifier.padding(8.dp)) {
+                            Text("SHA-256 Checksum", color = Slate400, fontSize = 10.sp)
+                            Text(prev.sha256, color = Emerald400, fontFamily = FontFamily.Monospace, fontSize = 9.sp)
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    Button(
+                        onClick = { prepareStream(prev) },
+                        colors = ButtonDefaults.buttonColors(containerColor = Emerald400, contentColor = Slate950),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(if (meta?.id != null) "Regenerate & Start Transmission" else "Initiate Optical Transmission", fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+            Spacer(modifier = Modifier.height(14.dp))
+        }
+
+        // Chunk Map
         meta?.let {
             ChunkMap(
                 totalChunks = it.totalChunks,
                 receivedIndices = (0 until it.totalChunks).toSet(),
-                currentChunkIndex = currentFrameIndex % it.totalChunks.coerceAtLeast(1)
+                currentChunkIndex = currentFrameIndex % it.totalChunks
             )
+            Spacer(modifier = Modifier.height(14.dp))
         }
 
-        Spacer(modifier = Modifier.height(14.dp))
-
-        // Settings Panel
-        AnimatedVisibility(visible = showSettings) {
+        // Fine Tuning Drawer
+        if (showSettings) {
             Surface(
                 shape = RoundedCornerShape(12.dp),
                 color = Slate900,
                 border = BorderStroke(1.dp, Slate800),
-                modifier = Modifier.fillMaxWidth().padding(bottom = 14.dp)
+                modifier = Modifier.fillMaxWidth()
             ) {
-                Column(modifier = Modifier.padding(14.dp)) {
-                    Text(
-                        text = "Transmitter Parameters",
-                        style = MaterialTheme.typography.titleSmall.copy(
-                            fontWeight = FontWeight.Bold,
-                            color = Slate100
-                        )
-                    )
-
-                    Spacer(modifier = Modifier.height(10.dp))
-
-                    // FPS Slider
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text(text = "Optical Speed", style = MaterialTheme.typography.bodyMedium.copy(color = Slate400))
-                        Text(text = "${config.fps} FPS", style = MaterialTheme.typography.bodyMedium.copy(color = Cyan400, fontWeight = FontWeight.Bold))
-                    }
+                Column(modifier = Modifier.padding(12.dp)) {
+                    Text("Fine-Tune FPS", style = MaterialTheme.typography.bodySmall.copy(color = Slate400))
                     Slider(
                         value = config.fps.toFloat(),
                         onValueChange = { config = config.copy(fps = it.toInt()) },
                         valueRange = 1f..30f,
-                        steps = 28,
                         colors = SliderDefaults.colors(thumbColor = Cyan400, activeTrackColor = Cyan400)
                     )
 
-                    Spacer(modifier = Modifier.height(8.dp))
+                    Spacer(modifier = Modifier.height(6.dp))
 
-                    // Chunk Size Slider
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text(text = "Chunk Size", style = MaterialTheme.typography.bodyMedium.copy(color = Slate400))
-                        Text(text = "${config.chunkSize} bytes", style = MaterialTheme.typography.bodyMedium.copy(color = Cyan400, fontWeight = FontWeight.Bold))
-                    }
+                    Text("Chunk Size (${config.chunkSize} bytes)", style = MaterialTheme.typography.bodySmall.copy(color = Slate400))
                     Slider(
                         value = config.chunkSize.toFloat(),
-                        onValueChange = { config = config.copy(chunkSize = it.toInt()) },
-                        valueRange = 150f..1400f,
+                        onValueChange = {
+                            config = config.copy(chunkSize = it.toInt())
+                            pendingPreview?.let { prev -> prepareStream(prev) }
+                        },
+                        valueRange = 150f..1200f,
+                        steps = 21,
                         colors = SliderDefaults.colors(thumbColor = Cyan400, activeTrackColor = Cyan400)
                     )
-
-                    Spacer(modifier = Modifier.height(8.dp))
-
-                    // Toggles
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(text = "GZIP Compression", color = Slate100)
-                        Switch(
-                            checked = config.useCompression,
-                            onCheckedChange = { config = config.copy(useCompression = it) },
-                            colors = SwitchDefaults.colors(checkedThumbColor = Cyan400)
-                        )
-                    }
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(text = "Invert QR Color (White on Black)", color = Slate100)
-                        Switch(
-                            checked = config.invertColor,
-                            onCheckedChange = { config = config.copy(invertColor = it) },
-                            colors = SwitchDefaults.colors(checkedThumbColor = Cyan400)
-                        )
-                    }
                 }
             }
+            Spacer(modifier = Modifier.height(14.dp))
         }
 
-        // Event Terminal
+        // Event Terminal Logs
         EventLogList(logs = logs)
-    }
-
-    // Fullscreen Mode Dialog for unobstructed optical scanning
-    if (isFullscreen && currentBitmap != null) {
-        Dialog(
-            onDismissRequest = { isFullscreen = false },
-            properties = DialogProperties(usePlatformDefaultWidth = false)
-        ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(if (config.invertColor) Color.Black else Color.White)
-                    .clickable { isFullscreen = false },
-                contentAlignment = Alignment.Center
-            ) {
-                Image(
-                    bitmap = currentBitmap.asImageBitmap(),
-                    contentDescription = "Fullscreen QR",
-                    modifier = Modifier
-                        .fillMaxWidth(0.92f)
-                        .aspectRatio(1f)
-                )
-
-                IconButton(
-                    onClick = { isFullscreen = false },
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .padding(16.dp)
-                        .background(Slate950.copy(alpha = 0.7f), CircleShape)
-                ) {
-                    Icon(imageVector = Icons.Default.Close, contentDescription = "Exit", tint = Color.White)
-                }
-            }
-        }
     }
 }

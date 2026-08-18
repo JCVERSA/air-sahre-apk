@@ -1,16 +1,36 @@
-import React, { useState } from 'react';
+import React, { useState, useCallback } from 'react';
 import { Header, AppMode } from './components/Header';
 import { SenderView } from './components/Sender/SenderView';
 import { ReceiverView } from './components/Receiver/ReceiverView';
 import { LoopbackView } from './components/Loopback/LoopbackView';
 import { DocumentationModal } from './components/DocumentationModal';
 import { HistoryModal } from './components/HistoryModal';
+import { ToastContainer, ToastMessage } from './components/Toast';
 import { WifiOff, ShieldCheck, Cpu } from 'lucide-react';
 
 export default function App() {
   const [mode, setMode] = useState<AppMode>('sender');
   const [docsOpen, setDocsOpen] = useState<boolean>(false);
   const [historyOpen, setHistoryOpen] = useState<boolean>(false);
+  const [toasts, setToasts] = useState<ToastMessage[]>([]);
+
+  const addToast = useCallback(
+    (type: ToastMessage['type'], title: string, message: string) => {
+      const newToast: ToastMessage = {
+        id: Math.random().toString(),
+        type,
+        title,
+        message,
+        duration: type === 'error' ? 6000 : 4500,
+      };
+      setToasts((prev) => [...prev.slice(-3), newToast]);
+    },
+    []
+  );
+
+  const dismissToast = useCallback((id: string) => {
+    setToasts((prev) => prev.filter((t) => t.id !== id));
+  }, []);
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col selection:bg-cyan-500 selection:text-slate-950 font-sans">
@@ -22,8 +42,8 @@ export default function App() {
       />
 
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
-        {mode === 'sender' && <SenderView />}
-        {mode === 'receiver' && <ReceiverView />}
+        {mode === 'sender' && <SenderView onNotify={addToast} />}
+        {mode === 'receiver' && <ReceiverView onNotify={addToast} />}
         {mode === 'loopback' && <LoopbackView />}
       </main>
 
@@ -48,6 +68,7 @@ export default function App() {
 
       <DocumentationModal isOpen={docsOpen} onClose={() => setDocsOpen(false)} />
       <HistoryModal isOpen={historyOpen} onClose={() => setHistoryOpen(false)} />
+      <ToastContainer toasts={toasts} onDismiss={dismissToast} />
     </div>
   );
 }

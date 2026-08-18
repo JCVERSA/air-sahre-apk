@@ -46,10 +46,13 @@ import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.FileOpen
+import androidx.compose.material.icons.filled.Gauge
+import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Sensors
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.VideocamOff
@@ -102,9 +105,11 @@ import com.example.model.ReceiverStatus
 import com.example.model.SessionHistoryItem
 import com.example.model.TransferMeta
 import com.example.ui.components.AdaptiveLinkHud
+import com.example.ui.components.AppToast
 import com.example.ui.components.ChunkMap
 import com.example.ui.components.EventLogList
 import com.example.ui.components.QrFeedbackBeaconDialog
+import com.example.ui.components.ToastType
 import com.example.ui.theme.Amber400
 import com.example.ui.theme.Cyan400
 import com.example.ui.theme.Emerald400
@@ -140,6 +145,7 @@ import java.util.concurrent.Executors
 @Composable
 fun ReceiverScreen(
     historyRepo: HistoryRepository,
+    onNotify: (AppToast) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -163,6 +169,15 @@ fun ReceiverScreen(
         ActivityResultContracts.RequestPermission()
     ) { isGranted ->
         hasCameraPermission = isGranted
+        if (!isGranted) {
+            onNotify(
+                AppToast(
+                    type = ToastType.ERROR,
+                    title = "Camera Permission Denied",
+                    message = "Camera access is needed to scan visual QR streams."
+                )
+            )
+        }
     }
 
     var receiverState by remember { mutableStateOf(ReceiverState()) }
@@ -171,8 +186,8 @@ fun ReceiverScreen(
     var isCameraActive by remember { mutableStateOf(true) }
     var showBeaconDialog by remember { mutableStateOf(false) }
     var speedKb by remember { mutableDoubleStateOf(0.0) }
+    var peakSpeedKb by remember { mutableDoubleStateOf(0.0) }
     var lastScannedText by remember { mutableStateOf<String?>(null) }
-    var lastFrameTimestamp by remember { mutableLongStateOf(0L) }
     var frameCount by remember { mutableIntStateOf(0) }
 
     fun addLog(level: String, msg: String) {
@@ -185,7 +200,15 @@ fun ReceiverScreen(
         receiverState = ReceiverState()
         lastScannedText = null
         speedKb = 0.0
+        peakSpeedKb = 0.0
         addLog("info", "Receiver reset to idle state.")
+        onNotify(
+            AppToast(
+                type = ToastType.INFO,
+                title = "Receiver Reset",
+                message = "Optical receiver ready for new incoming scan."
+            )
+        )
     }
 
     // Assembly and SHA-256 verification
@@ -222,6 +245,14 @@ fun ReceiverScreen(
                     )
                     addLog("success", "SHA-256 Verification PASSED! ${meta.name} ready.")
 
+                    onNotify(
+                        AppToast(
+                            type = ToastType.SUCCESS,
+                            title = "Transfer Complete & Verified",
+                            message = "File \"${meta.name}\" received with 100% SHA-256 match (${computedSha256.take(10)}...)."
+                        )
+                    )
+
                     val duration = ((System.currentTimeMillis() - (receiverState.startTime ?: System.currentTimeMillis())) / 1000.0).coerceAtLeast(0.1)
                     val avgSpeed = (meta.size / 1024.0) / duration
 
@@ -250,6 +281,14 @@ fun ReceiverScreen(
                         errorMessage = "SHA-256 hash mismatch! Data may be corrupted."
                     )
                     addLog("error", "SHA-256 Checksum FAILED! Expected ${meta.hash}, got $computedSha256")
+
+                    onNotify(
+                        AppToast(
+                            type = ToastType.ERROR,
+                            title = "Integrity Check Failed",
+                            message = "SHA-256 hash mismatch for \"${meta.name}\". The transmission was corrupted."
+                        )
+                    )
                 }
             }
         }
@@ -258,7 +297,7 @@ fun ReceiverScreen(
     // Process incoming packet
     fun handleDecodedText(text: String) {
         if (text == lastScannedText && receiverState.status == ReceiverStatus.RECEIVING) {
-            return // Skip duplicate frame
+            return
         }
         lastScannedText = text
         frameCount++
@@ -277,6 +316,13 @@ fun ReceiverScreen(
                             startTime = System.currentTimeMillis()
                         )
                         addLog("info", "Detected optical stream: ${meta.name} (${CryptoUtil.formatBytes(meta.size)})")
+                        onNotify(
+                            AppToast(
+                                type = ToastType.INFO,
+                                title = "Incoming Stream Detected",
+                                message = "Receiving \"${meta.name}\" (${meta.totalChunks} chunks)."
+                            )
+                        )
                     }
                 }
             }
@@ -298,7 +344,9 @@ fun ReceiverScreen(
                                 val now = System.currentTimeMillis()
 
                                 val elapsedSec = ((now - (receiverState.startTime ?: now)) / 1000.0).coerceAtLeast(0.1)
-                                speedKb = (receivedChunksMap.values.sumOf { it.size.toLong() } / 1024.0) / elapsedSec
+                                val currentSpeed = (receivedChunksMap.values.sumOf { it.size.toLong() } / 1024.0) / elapsedSec
+                                speedKb = currentSpeed
+                                if (currentSpeed > peakSpeedKb) peakSpeedKb = currentSpeed
 
                                 receiverState = receiverState.copy(
                                     status = ReceiverStatus.RECEIVING,
@@ -318,9 +366,7 @@ fun ReceiverScreen(
                     }
                 }
             }
-            PacketType.FEEDBACK -> {
-                // Optical feedback packet received
-            }
+            PacketType.FEEDBACK -> {}
         }
     }
 
@@ -337,7 +383,6 @@ fun ReceiverScreen(
             }
             context.startActivity(Intent.createChooser(intent, "Share AirQR File"))
         } catch (e: Exception) {
-            // fallback plain share or text
             try {
                 val intent = Intent(Intent.ACTION_SEND).apply {
                     type = "text/plain"
@@ -349,6 +394,10 @@ fun ReceiverScreen(
             }
         }
     }
+
+    val progressPercent = if (receiverState.totalChunks > 0) {
+        ((receivedChunksMap.size.toFloat() / receiverState.totalChunks.toFloat()) * 100).toInt()
+    } else 0
 
     Column(
         modifier = modifier
@@ -380,16 +429,8 @@ fun ReceiverScreen(
                         )
                     )
                 }
-                val statusText = when (receiverState.status) {
-                    ReceiverStatus.IDLE -> "Point camera at sender display"
-                    ReceiverStatus.SCANNING -> "Scanning for optical stream..."
-                    ReceiverStatus.RECEIVING -> "Receiving stream (${receivedChunksMap.size}/${receiverState.totalChunks})"
-                    ReceiverStatus.VERIFYING -> "Verifying cryptographic SHA-256..."
-                    ReceiverStatus.COMPLETED -> "Transfer completed & verified"
-                    ReceiverStatus.ERROR -> "Transfer failed"
-                }
                 Text(
-                    text = statusText,
+                    text = "Active optical scanner with live telemetry",
                     style = MaterialTheme.typography.bodySmall.copy(color = Slate400)
                 )
             }
@@ -406,7 +447,7 @@ fun ReceiverScreen(
 
         Spacer(modifier = Modifier.height(14.dp))
 
-        // Camera Viewfinder Box
+        // Camera Viewfinder Box with Speed HUD
         Surface(
             shape = RoundedCornerShape(16.dp),
             color = Slate950,
@@ -483,7 +524,6 @@ fun ReceiverScreen(
                                             }
                                         }
                                     } catch (e: Exception) {
-                                        // Ignore QR not found in frame
                                     } finally {
                                         multiFormatReader.reset()
                                         imageProxy.close()
@@ -499,7 +539,6 @@ fun ReceiverScreen(
                                         imageAnalysis
                                     )
                                 } catch (e: Exception) {
-                                    // Camera bind exception
                                 }
                             }, ContextCompat.getMainExecutor(ctx))
                             previewView
@@ -516,13 +555,52 @@ fun ReceiverScreen(
                     )
                 }
 
-                // Status overlay
-                Box(
+                // Top Right Real-Time Speed Badge HUD
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = Slate950.copy(alpha = 0.88f),
+                    border = BorderStroke(1.dp, Emerald400.copy(alpha = 0.5f)),
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(10.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(8.dp)
+                                .clip(CircleShape)
+                                .background(Emerald400)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Column(horizontalAlignment = Alignment.End) {
+                            Text(
+                                text = "TRANSFER SPEED",
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 8.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Slate400
+                            )
+                            Text(
+                                text = "%.1f KB/s".format(speedKb),
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Black,
+                                color = Emerald400
+                            )
+                        }
+                    }
+                }
+
+                // Bottom Status overlay with Progress Bar
+                Column(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
                         .fillMaxWidth()
-                        .background(Slate950.copy(alpha = 0.85f))
-                        .padding(vertical = 4.dp, horizontal = 8.dp)
+                        .background(Slate950.copy(alpha = 0.90f))
+                        .padding(8.dp)
                 ) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -537,9 +615,39 @@ fun ReceiverScreen(
                             color = if (receivedChunksMap.size == receiverState.totalChunks && receiverState.totalChunks > 0) Emerald400 else Cyan400
                         )
                         Text(
-                            text = "%.1f KB/s".format(speedKb),
+                            text = "$progressPercent%",
                             fontFamily = FontFamily.Monospace,
-                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 11.sp,
+                            color = Slate100
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(4.dp))
+
+                    LinearProgressIndicator(
+                        progress = { (progressPercent / 100f).coerceIn(0f, 1f) },
+                        modifier = Modifier.fillMaxWidth().height(4.dp),
+                        color = Emerald400,
+                        trackColor = Slate800
+                    )
+
+                    Spacer(modifier = Modifier.height(2.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = "Peak: %.1f KB/s".format(peakSpeedKb),
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 9.sp,
+                            color = Slate400
+                        )
+                        Text(
+                            text = if (receiverState.meta != null) receiverState.meta!!.name else "Optical P2P",
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 9.sp,
                             color = Slate400
                         )
                     }
