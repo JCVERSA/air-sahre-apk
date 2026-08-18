@@ -1,0 +1,10 @@
+{
+  "name": "AirQR - Visual Optical Air-Gapped File Transfer",
+  "description": "Peer-to-peer visual QR code stream file transfer system. Transfer files offline between devices using screen and camera with SHA-256 integrity verification.",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
