@@ -29,6 +29,35 @@
 
 ---
 
+## 🚀 GitHub & APK Build Guide
+
+### 1. Push to GitHub from Google AI Studio
+- Click the **GitHub icon / Export to GitHub** button in the top navigation bar of Google AI Studio.
+- Select or create your target repository (e.g. `airqr-android`).
+- Once pushed, GitHub Actions (`.github/workflows/build.yml`) will automatically trigger and build the APK artifact.
+
+### 2. Download APK from GitHub Actions
+1. Go to your repository on GitHub.
+2. Click on the **Actions** tab.
+3. Select the latest **Build Android APK** workflow run.
+4. Under **Artifacts** at the bottom of the page, download **`airqr-debug-apk`**.
+5. Unzip the downloaded file and install `app-debug.apk` directly onto your Android device.
+
+### 3. Build Locally with Android Studio / Gradle
+```bash
+# Clone the repository
+git clone https://github.com/<your-username>/airqr.git
+cd airqr
+
+# Build the debug APK
+gradle :app:assembleDebug
+
+# The APK will be generated at:
+# app/build/outputs/apk/debug/app-debug.apk
+```
+
+---
+
 ## 📡 Protocol Specification (AIR2)
 
 - **Metadata Packet (`M`):**
