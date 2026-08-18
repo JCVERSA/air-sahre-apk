@@ -10,12 +10,16 @@ android {
 
     defaultConfig {
         applicationId = "com.aistudio.airqr.kzwx"
-        minSdk = 26
+        minSdk = 24
         targetSdk = 35
         versionCode = 1
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        ndk {
+            abiFilters.addAll(listOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64"))
+        }
     }
 
     signingConfigs {
@@ -41,11 +45,11 @@ android {
         }
     }
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_21
-        targetCompatibility = JavaVersion.VERSION_21
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions {
-        jvmTarget = "21"
+        jvmTarget = "17"
     }
     buildFeatures {
         compose = true
@@ -65,13 +69,13 @@ dependencies {
     implementation(libs.androidx.material.icons.extended)
     implementation(libs.androidx.navigation.compose)
 
-    // CameraX
+    // CameraX (Supported on API 21+)
     implementation(libs.androidx.camera.core)
     implementation(libs.androidx.camera.camera2)
     implementation(libs.androidx.camera.lifecycle)
     implementation(libs.androidx.camera.view)
 
-    // ZXing for QR Code generation & decoding
+    // ZXing for QR Code generation & decoding (Pure Java/Android, 32-bit & 64-bit compatible)
     implementation(libs.zxing.core)
 
     // Coroutines
