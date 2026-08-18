@@ -4,12 +4,12 @@ import {
   TransferMeta,
   ChunkPayload,
   LogEntry,
-  QrDensityPreset,
+  BatteryStatus,
 } from '../../types/transfer';
 import { computeSHA256, formatBytes, generateTransferId } from '../../utils/crypto';
 import { uint8ArrayToBase45, compressData } from '../../utils/base45';
 import { encodeMetaPacket, encodeChunkPacket } from '../../utils/protocol';
-import { renderQRToCanvas, preRenderQRCache } from '../../utils/qr';
+import { preRenderQRCache } from '../../utils/qr';
 import { addSessionHistoryItem } from '../../utils/history';
 import { ChunkMap } from '../ChunkMap';
 import { EventLog } from '../EventLog';
@@ -22,13 +22,14 @@ import {
   Sliders,
   FileText,
   Radio,
-  Zap,
   Shield,
   Clock,
   Layers,
   Sparkles,
-  CheckCircle2,
   Gauge,
+  Zap,
+  Leaf,
+  FileArchive,
 } from 'lucide-react';
 
 const DEFAULT_CONFIG: SenderConfig = {
@@ -60,9 +61,15 @@ const FPS_PRESETS = [
 
 interface SenderViewProps {
   onNotify?: (type: 'success' | 'error' | 'warning' | 'info', title: string, message: string) => void;
+  batterySaver?: boolean;
+  onToggleBatterySaver?: () => void;
 }
 
-export const SenderView: React.FC<SenderViewProps> = ({ onNotify }) => {
+export const SenderView: React.FC<SenderViewProps> = ({
+  onNotify,
+  batterySaver = false,
+  onToggleBatterySaver,
+}) => {
   const [file, setFile] = useState<File | null>(null);
   const [meta, setMeta] = useState<TransferMeta | null>(null);
   const [pendingPreview, setPendingPreview] = useState<{
@@ -70,6 +77,9 @@ export const SenderView: React.FC<SenderViewProps> = ({ onNotify }) => {
     size: number;
     type: string;
     sha256: string;
+    compressedSize: number;
+    wasCompressed: boolean;
+    savingsPercent: number;
     estChunks: number;
     estDurationSec: number;
   } | null>(null);
@@ -85,6 +95,9 @@ export const SenderView: React.FC<SenderViewProps> = ({ onNotify }) => {
 
   const displayCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
+  // Effective FPS considering Battery Saver Mode
+  const effectiveFps = batterySaver ? Math.min(config.fps, 6) : config.fps;
+
   const addLog = (level: LogEntry['level'], message: string) => {
     setLogs((prev) => [{ id: Math.random().toString(), timestamp: new Date(), level, message }, ...prev.slice(0, 40)]);
   };
@@ -92,9 +105,11 @@ export const SenderView: React.FC<SenderViewProps> = ({ onNotify }) => {
   // Prepare default sample payload
   useEffect(() => {
     if (!file && encodedPackets.length === 0) {
-      const sampleText = `AirQR Optical Protocol V2 Payload\n=================================\nThis is a secure air-gapped file transfer beamed across screens via high-density Base45 optical QR codes.\nRFC 9285 Base45 + GZIP Compression + SHA-256 Checksum.\n100% offline visual communication.`;
+      const sampleText = `AirQR Optical Protocol V2 Payload\n=================================\nThis is a secure air-gapped file transfer beamed across screens via high-density Base45 optical QR codes.\nLightweight GZIP/Deflate Compression + RFC 9285 Base45 + SHA-256 Checksum.\n100% offline visual communication.\n` +
+        `Repeating payload sample text for compression demonstration: \n` +
+        `Air-gapped transfer without Wi-Fi, Bluetooth, or cellular networks. `.repeat(10);
       const blob = new Blob([sampleText], { type: 'text/plain' });
-      const sampleFile = new File([blob], 'airqr_sample_memo.txt', { type: 'text/plain' });
+      const sampleFile = new File([blob], 'airqr_memo_report.txt', { type: 'text/plain' });
       handleFileSelected(sampleFile, true);
     }
   }, []);
@@ -107,14 +122,23 @@ export const SenderView: React.FC<SenderViewProps> = ({ onNotify }) => {
     const rawBytes = new Uint8Array(arrayBuffer);
     const sha256 = await computeSHA256(rawBytes);
 
-    const estChunkCount = Math.max(1, Math.ceil(f.size / (config.chunkSize * 0.9)));
-    const estSec = Math.max(1, Math.ceil(estChunkCount / config.fps));
+    const { compressed, wasCompressed } = config.useCompression
+      ? await compressData(rawBytes)
+      : { compressed: rawBytes, wasCompressed: false };
+
+    const effectiveSize = wasCompressed ? compressed.byteLength : f.size;
+    const savingsPercent = wasCompressed ? Math.round(((f.size - compressed.byteLength) / f.size) * 100) : 0;
+    const estChunkCount = Math.max(1, Math.ceil(effectiveSize / config.chunkSize));
+    const estSec = Math.max(1, Math.ceil(estChunkCount / effectiveFps));
 
     setPendingPreview({
       file: f,
       size: f.size,
       type: f.type || 'application/octet-stream',
       sha256,
+      compressedSize: effectiveSize,
+      wasCompressed,
+      savingsPercent,
       estChunks: estChunkCount,
       estDurationSec: estSec,
     });
@@ -126,20 +150,25 @@ export const SenderView: React.FC<SenderViewProps> = ({ onNotify }) => {
       onNotify?.(
         'info',
         'File Ready for Inspection',
-        `Review "${f.name}" metadata before initiating optical stream.`
+        `Review "${f.name}" metadata and compression stats before initiating optical stream.`
       );
     }
   };
 
   const generateAndStream = async (f: File, sha256: string, rawBytes?: Uint8Array) => {
     setIsProcessing(true);
-    addLog('info', `Encoding payload: ${f.name} (${formatBytes(f.size)})`);
-
     const bytes = rawBytes || new Uint8Array(await f.arrayBuffer());
 
     const { compressed, wasCompressed } = config.useCompression
       ? await compressData(bytes)
       : { compressed: bytes, wasCompressed: false };
+
+    const savingsPercent = wasCompressed ? Math.round(((f.size - compressed.byteLength) / f.size) * 100) : 0;
+    if (wasCompressed) {
+      addLog('info', `GZIP Compressed: ${formatBytes(f.size)} -> ${formatBytes(compressed.byteLength)} (-${savingsPercent}% savings)`);
+    } else {
+      addLog('info', `Encoding raw payload: ${f.name} (${formatBytes(f.size)})`);
+    }
 
     const chunkSize = config.chunkSize;
     const rawChunks: Uint8Array[] = [];
@@ -202,7 +231,7 @@ export const SenderView: React.FC<SenderViewProps> = ({ onNotify }) => {
     onNotify?.(
       'success',
       'Optical Stream Active',
-      `Transmitting "${f.name}" (${rawChunks.length} chunks at ${config.fps} FPS). Point receiver camera to scan.`
+      `Transmitting "${f.name}" (${rawChunks.length} chunks at ${effectiveFps} FPS${wasCompressed ? `, -${savingsPercent}% compressed` : ''}).`
     );
 
     addSessionHistoryItem({
@@ -215,22 +244,22 @@ export const SenderView: React.FC<SenderViewProps> = ({ onNotify }) => {
       timestamp: Date.now(),
       hash: sha256,
       totalChunks: rawChunks.length,
-      durationSeconds: rawChunks.length / config.fps,
-      averageSpeedKb: (f.size / 1024) / Math.max(0.1, rawChunks.length / config.fps),
+      durationSeconds: rawChunks.length / effectiveFps,
+      averageSpeedKb: (f.size / 1024) / Math.max(0.1, rawChunks.length / effectiveFps),
       status: 'success',
     });
   };
 
-  // Animation Loop
+  // Animation Loop with effectiveFps
   useEffect(() => {
     if (!isPlaying || preRenderedCanvases.length === 0) return;
 
     const interval = setInterval(() => {
       setCurrentFrameIndex((prev) => (prev + 1) % preRenderedCanvases.length);
-    }, 1000 / config.fps);
+    }, 1000 / effectiveFps);
 
     return () => clearInterval(interval);
-  }, [isPlaying, preRenderedCanvases, config.fps]);
+  }, [isPlaying, preRenderedCanvases, effectiveFps]);
 
   // Paint active canvas frame
   useEffect(() => {
@@ -269,15 +298,43 @@ export const SenderView: React.FC<SenderViewProps> = ({ onNotify }) => {
             </div>
           </div>
 
-          {/* QR Canvas Stage */}
-          <div className="relative p-4 bg-white rounded-2xl shadow-inner flex items-center justify-center border-4 border-cyan-500/40">
+          {/* Battery Saver Banner */}
+          {batterySaver && (
+            <div className="w-full mb-3 p-2.5 bg-emerald-950/60 border border-emerald-500/50 rounded-xl flex items-center justify-between text-xs text-emerald-300">
+              <div className="flex items-center gap-2">
+                <Leaf className="w-4 h-4 text-emerald-400 shrink-0" />
+                <span>
+                  <strong className="font-semibold">Battery Saver Active:</strong> Lowered brightness & capped to {effectiveFps} FPS.
+                </span>
+              </div>
+              {onToggleBatterySaver && (
+                <button
+                  onClick={onToggleBatterySaver}
+                  className="px-2 py-0.5 rounded bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-200 text-[10px] font-bold border border-emerald-500/40"
+                >
+                  Turn Off
+                </button>
+              )}
+            </div>
+          )}
+
+          {/* QR Canvas Stage with Battery Saver Dimming */}
+          <div
+            className={`relative p-4 rounded-2xl shadow-inner flex items-center justify-center border-4 transition-all duration-300 ${
+              batterySaver
+                ? 'bg-slate-200 border-emerald-500/40 brightness-85'
+                : 'bg-white border-cyan-500/40'
+            }`}
+          >
             <canvas ref={displayCanvasRef} className="max-w-full h-auto rounded-lg" />
 
             <div className="absolute bottom-2 inset-x-2 bg-slate-950/85 backdrop-blur rounded-lg px-3 py-1.5 text-[11px] font-mono flex items-center justify-between text-slate-200">
               <span className={isMetaFrame ? 'text-purple-400 font-bold' : 'text-cyan-400 font-bold'}>
                 {isMetaFrame ? 'METADATA PACKET' : `FRAME #${currentFrameIndex + 1} / ${encodedPackets.length}`}
               </span>
-              <span className="text-slate-400 font-semibold">{config.fps} FPS • BASE45</span>
+              <span className="text-slate-400 font-semibold">
+                {effectiveFps} FPS {batterySaver ? '(SAVER)' : ''} • BASE45
+              </span>
             </div>
           </div>
 
@@ -287,12 +344,12 @@ export const SenderView: React.FC<SenderViewProps> = ({ onNotify }) => {
               <span className="text-slate-400 flex items-center gap-1 font-semibold">
                 <Gauge className="w-3.5 h-3.5 text-cyan-400" /> Optical Stream Speed (FPS)
               </span>
-              <span className="font-mono font-bold text-cyan-400">{config.fps} FPS</span>
+              <span className="font-mono font-bold text-cyan-400">{effectiveFps} FPS</span>
             </div>
 
             <div className="grid grid-cols-4 gap-2">
               {FPS_PRESETS.map((preset) => {
-                const isSelected = config.fps === preset.value;
+                const isSelected = config.fps === preset.value && !batterySaver;
                 return (
                   <button
                     key={preset.value}
@@ -350,20 +407,35 @@ export const SenderView: React.FC<SenderViewProps> = ({ onNotify }) => {
                 </button>
               </div>
 
-              <button
-                onClick={() => setShowSettings(!showSettings)}
-                className="px-2.5 py-1 text-slate-400 hover:text-white bg-slate-900 rounded-lg border border-slate-800 text-xs flex items-center gap-1.5"
-              >
-                <Sliders className="w-3.5 h-3.5" /> Advanced Settings
-              </button>
+              <div className="flex items-center gap-2">
+                {onToggleBatterySaver && (
+                  <button
+                    onClick={onToggleBatterySaver}
+                    className={`px-2.5 py-1 rounded-lg border text-xs flex items-center gap-1.5 transition-colors ${
+                      batterySaver
+                        ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                        : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-white'
+                    }`}
+                  >
+                    <Leaf className="w-3.5 h-3.5" /> Battery Saver
+                  </button>
+                )}
+
+                <button
+                  onClick={() => setShowSettings(!showSettings)}
+                  className="px-2.5 py-1 text-slate-400 hover:text-white bg-slate-900 rounded-lg border border-slate-800 text-xs flex items-center gap-1.5"
+                >
+                  <Sliders className="w-3.5 h-3.5" /> Settings
+                </button>
+              </div>
             </div>
           </div>
         </div>
       </div>
 
-      {/* Right Column: File Metadata Preview, Chunk Map & Event Log */}
+      {/* Right Column: File Metadata Preview & Compression Stats */}
       <div className="lg:col-span-5 space-y-4">
-        {/* File Metadata Preview Card */}
+        {/* File Metadata & Compression Preview Card */}
         {pendingPreview && (
           <div className="bg-slate-900 border border-cyan-500/40 rounded-2xl p-4 text-xs space-y-3 shadow-lg shadow-cyan-950/20">
             <div className="flex items-center justify-between pb-2 border-b border-slate-800">
@@ -384,13 +456,38 @@ export const SenderView: React.FC<SenderViewProps> = ({ onNotify }) => {
                 </span>
               </div>
 
+              {/* Compression Highlights */}
+              <div className="bg-slate-950/60 p-2.5 rounded-lg border border-slate-800 flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <FileArchive className="w-4 h-4 text-purple-400" />
+                  <div>
+                    <div className="font-bold text-slate-200">GZIP Compression</div>
+                    <div className="text-[10px] text-slate-400 font-mono">
+                      {pendingPreview.wasCompressed
+                        ? `${formatBytes(pendingPreview.size)} -> ${formatBytes(pendingPreview.compressedSize)}`
+                        : 'Uncompressed (Raw Binary)'}
+                    </div>
+                  </div>
+                </div>
+
+                {pendingPreview.wasCompressed ? (
+                  <span className="px-2 py-1 bg-purple-500/20 text-purple-300 font-mono text-[11px] font-bold rounded border border-purple-500/30">
+                    -{pendingPreview.savingsPercent}% Size
+                  </span>
+                ) : (
+                  <span className="px-2 py-1 bg-slate-800 text-slate-400 font-mono text-[10px] rounded">
+                    Direct
+                  </span>
+                )}
+              </div>
+
               <div className="grid grid-cols-2 gap-2">
                 <div className="bg-slate-950/60 p-2 rounded-lg border border-slate-800">
                   <span className="text-[10px] text-slate-400 flex items-center gap-1">
-                    <Layers className="w-3 h-3 text-cyan-400" /> Payload Size
+                    <Layers className="w-3 h-3 text-cyan-400" /> Transfer Chunks
                   </span>
                   <div className="font-mono font-bold text-slate-100 mt-0.5">
-                    {formatBytes(pendingPreview.size)}
+                    {pendingPreview.estChunks} chunks
                   </div>
                 </div>
 
@@ -399,7 +496,7 @@ export const SenderView: React.FC<SenderViewProps> = ({ onNotify }) => {
                     <Clock className="w-3 h-3 text-purple-400" /> Est. Duration
                   </span>
                   <div className="font-mono font-bold text-slate-100 mt-0.5">
-                    ~{pendingPreview.estDurationSec}s ({pendingPreview.estChunks} chunks)
+                    ~{pendingPreview.estDurationSec}s @ {effectiveFps} FPS
                   </div>
                 </div>
               </div>
@@ -437,7 +534,25 @@ export const SenderView: React.FC<SenderViewProps> = ({ onNotify }) => {
         {/* Advanced Settings Drawer */}
         {showSettings && (
           <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 text-xs space-y-3">
-            <h4 className="font-semibold text-slate-200">Custom Fine Tuning</h4>
+            <h4 className="font-semibold text-slate-200">Transmission & Power Parameters</h4>
+
+            {/* Compression Toggle */}
+            <div className="flex items-center justify-between bg-slate-950/60 p-2.5 rounded-lg border border-slate-800">
+              <div>
+                <div className="font-semibold text-slate-200">ZLIB / GZIP Compression</div>
+                <div className="text-[10px] text-slate-400">Compress text & code payloads before chunking</div>
+              </div>
+              <input
+                type="checkbox"
+                checked={config.useCompression}
+                onChange={(e) => {
+                  setConfig({ ...config, useCompression: e.target.checked });
+                  if (file) handleFileSelected(file, true);
+                }}
+                className="w-4 h-4 accent-cyan-400 cursor-pointer"
+              />
+            </div>
+
             <div>
               <div className="flex justify-between text-slate-400 mb-1">
                 <span>FPS Speed Fine-Tune: {config.fps} FPS</span>
@@ -451,6 +566,7 @@ export const SenderView: React.FC<SenderViewProps> = ({ onNotify }) => {
                 className="w-full accent-cyan-400 h-1.5 bg-slate-800 rounded cursor-pointer"
               />
             </div>
+
             <div>
               <div className="flex justify-between text-slate-400 mb-1">
                 <span>Chunk Size: {config.chunkSize} bytes</span>

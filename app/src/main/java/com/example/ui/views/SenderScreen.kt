@@ -30,7 +30,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ChevronLeft
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.Eco
 import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.FolderZip
 import androidx.compose.material.icons.filled.Gauge
 import androidx.compose.material.icons.filled.HourglassEmpty
 import androidx.compose.material.icons.filled.Layers
@@ -52,6 +54,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -64,6 +68,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
@@ -103,7 +108,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.InputStream
 import java.util.UUID
 
 data class FilePreviewInfo(
@@ -111,6 +115,9 @@ data class FilePreviewInfo(
     val size: Long,
     val type: String,
     val sha256: String,
+    val compressedSize: Long,
+    val wasCompressed: Boolean,
+    val savingsPercent: Int,
     val estChunks: Int,
     val estDurationSec: Int,
     val rawBytes: ByteArray
@@ -126,6 +133,8 @@ val FPS_PRESETS = listOf(
 @Composable
 fun SenderScreen(
     historyRepo: HistoryRepository,
+    batterySaver: Boolean = false,
+    onToggleBatterySaver: (() -> Unit)? = null,
     onNotify: (AppToast) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
@@ -143,6 +152,8 @@ fun SenderScreen(
     var showSettings by remember { mutableStateOf(false) }
     val logs = remember { mutableStateListOf<LogEntry>() }
 
+    val effectiveFps = if (batterySaver) minOf(config.fps, 6) else config.fps
+
     fun addLog(level: String, msg: String) {
         logs.add(0, LogEntry(id = UUID.randomUUID().toString(), level = level, message = msg))
         if (logs.size > 50) logs.removeLast()
@@ -150,13 +161,21 @@ fun SenderScreen(
 
     fun prepareStream(preview: FilePreviewInfo) {
         isProcessing = true
-        addLog("info", "Encoding payload: ${preview.name} (${CryptoUtil.formatBytes(preview.size)})")
-
         scope.launch(Dispatchers.Default) {
             val (dataToChunk, wasCompressed) = if (config.useCompression) {
                 GzipUtil.compress(preview.rawBytes)
             } else {
                 Pair(preview.rawBytes, false)
+            }
+
+            val savings = if (wasCompressed) {
+                (((preview.size - dataToChunk.size).toDouble() / preview.size.toDouble()) * 100).toInt()
+            } else 0
+
+            if (wasCompressed) {
+                addLog("info", "GZIP Compressed: ${CryptoUtil.formatBytes(preview.size)} -> ${CryptoUtil.formatBytes(dataToChunk.size.toLong())} (-$savings% savings)")
+            } else {
+                addLog("info", "Encoding payload: ${preview.name} (${CryptoUtil.formatBytes(preview.size)})")
             }
 
             val chunkSize = config.chunkSize
@@ -230,11 +249,11 @@ fun SenderScreen(
                     AppToast(
                         type = ToastType.SUCCESS,
                         title = "Optical Stream Active",
-                        message = "Transmitting \"${preview.name}\" (${rawChunks.size} chunks at ${config.fps} FPS)."
+                        message = "Transmitting \"${preview.name}\" (${rawChunks.size} chunks at $effectiveFps FPS${if (wasCompressed) ", -$savings% compressed" else ""})."
                     )
                 )
 
-                val duration = (rawChunks.size.toDouble() / config.fps.toDouble()).coerceAtLeast(0.1)
+                val duration = (rawChunks.size.toDouble() / effectiveFps.toDouble()).coerceAtLeast(0.1)
                 val avgSpeed = (preview.size / 1024.0) / duration
 
                 historyRepo.addItem(
@@ -259,14 +278,20 @@ fun SenderScreen(
 
     fun inspectFile(name: String, size: Long, type: String, bytes: ByteArray, autoStart: Boolean = false) {
         val sha256 = CryptoUtil.computeSHA256(bytes)
-        val estChunks = (size / (config.chunkSize * 0.9)).toInt().coerceAtLeast(1)
-        val estDuration = (estChunks / config.fps).coerceAtLeast(1)
+        val (compressed, wasCompressed) = if (config.useCompression) GzipUtil.compress(bytes) else Pair(bytes, false)
+        val effectiveSize = if (wasCompressed) compressed.size.toLong() else size
+        val savings = if (wasCompressed) (((size - compressed.size).toDouble() / size.toDouble()) * 100).toInt() else 0
+        val estChunks = (effectiveSize / config.chunkSize).toInt().coerceAtLeast(1)
+        val estDuration = (estChunks / effectiveFps).coerceAtLeast(1)
 
         val preview = FilePreviewInfo(
             name = name,
             size = size,
             type = type,
             sha256 = sha256,
+            compressedSize = effectiveSize,
+            wasCompressed = wasCompressed,
+            savingsPercent = savings,
             estChunks = estChunks,
             estDurationSec = estDuration,
             rawBytes = bytes
@@ -279,7 +304,7 @@ fun SenderScreen(
             onNotify(
                 AppToast(
                     type = ToastType.INFO,
-                    title = "File Metadata Ready",
+                    title = "File Metadata & Compression Ready",
                     message = "Preview details for \"$name\" before initiating optical stream."
                 )
             )
@@ -289,9 +314,11 @@ fun SenderScreen(
     // Default sample file initialization
     LaunchedEffect(Unit) {
         if (packets.isEmpty()) {
-            val sampleText = "AirQR Optical Protocol V2 Payload\n=================================\nThis is an air-gapped file transfer beamed across screens via high-density Base45 optical QR codes.\n100% offline visual communication."
+            val sampleText = "AirQR Optical Protocol V2 Payload\n=================================\nThis is an air-gapped file transfer beamed across screens via high-density Base45 optical QR codes.\nLightweight GZIP/Deflate Compression + RFC 9285 Base45 + SHA-256 Checksum.\n100% offline visual communication.\n" +
+                    "Repeating text for compression: \n" +
+                    "Secure air-gapped transfer without Wi-Fi or Bluetooth. ".repeat(8)
             val bytes = sampleText.toByteArray(Charsets.UTF_8)
-            inspectFile("airqr_sample_memo.txt", bytes.size.toLong(), "text/plain", bytes, autoStart = true)
+            inspectFile("airqr_memo_report.txt", bytes.size.toLong(), "text/plain", bytes, autoStart = true)
         }
     }
 
@@ -324,10 +351,10 @@ fun SenderScreen(
         }
     }
 
-    // Playback loop
-    LaunchedEffect(isPlaying, qrBitmaps.size, config.fps) {
+    // Playback loop with effectiveFps
+    LaunchedEffect(isPlaying, qrBitmaps.size, effectiveFps) {
         if (isPlaying && qrBitmaps.isNotEmpty()) {
-            val delayMs = (1000L / config.fps.coerceIn(1, 30))
+            val delayMs = (1000L / effectiveFps.coerceIn(1, 30))
             while (isActive && isPlaying) {
                 delay(delayMs)
                 currentFrameIndex = (currentFrameIndex + 1) % qrBitmaps.size
@@ -384,16 +411,52 @@ fun SenderScreen(
             }
         }
 
-        Spacer(modifier = Modifier.height(14.dp))
+        Spacer(modifier = Modifier.height(12.dp))
 
-        // QR Code Display Stage
+        // Battery Saver Active Indicator Banner
+        if (batterySaver) {
+            Surface(
+                shape = RoundedCornerShape(10.dp),
+                color = Emerald400.copy(alpha = 0.15f),
+                border = BorderStroke(1.dp, Emerald400.copy(alpha = 0.5f)),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(imageVector = Icons.Default.Eco, contentDescription = null, tint = Emerald400, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Battery Saver: Capped at $effectiveFps FPS & Display Dimmed",
+                            style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.SemiBold, color = Emerald400)
+                        )
+                    }
+                    if (onToggleBatterySaver != null) {
+                        Text(
+                            text = "Turn Off",
+                            color = Slate300,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 11.sp,
+                            modifier = Modifier.clickable { onToggleBatterySaver() }
+                        )
+                    }
+                }
+            }
+            Spacer(modifier = Modifier.height(10.dp))
+        }
+
+        // QR Code Display Stage (with battery saver brightness reduction)
         Surface(
             shape = RoundedCornerShape(16.dp),
-            color = Color.White,
-            border = BorderStroke(3.dp, Cyan400),
+            color = if (batterySaver) Color(0xFFD4D4D8) else Color.White,
+            border = BorderStroke(3.dp, if (batterySaver) Emerald400 else Cyan400),
             modifier = Modifier
                 .fillMaxWidth(0.85f)
                 .aspectRatio(1f)
+                .alpha(if (batterySaver) 0.88f else 1.0f)
         ) {
             Box(
                 modifier = Modifier.fillMaxSize(),
@@ -431,7 +494,7 @@ fun SenderScreen(
                                 color = if (isMeta) Purple400 else Cyan400
                             )
                             Text(
-                                text = "${config.fps} FPS • BASE45",
+                                text = "$effectiveFps FPS ${if (batterySaver) "(SAVER)" else ""} • BASE45",
                                 fontFamily = FontFamily.Monospace,
                                 fontSize = 10.sp,
                                 color = Slate400
@@ -466,7 +529,7 @@ fun SenderScreen(
                         )
                     }
                     Text(
-                        text = "${config.fps} FPS",
+                        text = "$effectiveFps FPS",
                         fontFamily = FontFamily.Monospace,
                         fontWeight = FontWeight.Bold,
                         color = Cyan400
@@ -481,7 +544,7 @@ fun SenderScreen(
                 ) {
                     FPS_PRESETS.forEach { (label, pair) ->
                         val (desc, targetFps) = pair
-                        val isSelected = config.fps == targetFps
+                        val isSelected = config.fps == targetFps && !batterySaver
                         Surface(
                             shape = RoundedCornerShape(8.dp),
                             color = if (isSelected) Cyan400 else Slate950,
@@ -576,8 +639,20 @@ fun SenderScreen(
                         }
                     }
 
-                    IconButton(onClick = { showSettings = !showSettings }) {
-                        Icon(imageVector = Icons.Default.Tune, contentDescription = "Settings", tint = Slate400)
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        if (onToggleBatterySaver != null) {
+                            IconButton(onClick = onToggleBatterySaver) {
+                                Icon(
+                                    imageVector = Icons.Default.Eco,
+                                    contentDescription = "Battery Saver",
+                                    tint = if (batterySaver) Emerald400 else Slate400
+                                )
+                            }
+                        }
+
+                        IconButton(onClick = { showSettings = !showSettings }) {
+                            Icon(imageVector = Icons.Default.Tune, contentDescription = "Settings", tint = Slate400)
+                        }
                     }
                 }
             }
@@ -585,7 +660,7 @@ fun SenderScreen(
 
         Spacer(modifier = Modifier.height(14.dp))
 
-        // File Metadata Preview Card
+        // File Metadata Preview & Compression Stats Card
         pendingPreview?.let { prev ->
             Surface(
                 shape = RoundedCornerShape(12.dp),
@@ -641,6 +716,50 @@ fun SenderScreen(
 
                     Spacer(modifier = Modifier.height(6.dp))
 
+                    // GZIP Compression Metrics
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = Slate950,
+                        border = BorderStroke(1.dp, Slate800),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(8.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(imageVector = Icons.Default.FolderZip, contentDescription = null, tint = Purple400, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Column {
+                                    Text("GZIP Compression", color = Slate100, fontWeight = FontWeight.SemiBold, fontSize = 11.sp)
+                                    Text(
+                                        if (prev.wasCompressed) "${CryptoUtil.formatBytes(prev.size)} -> ${CryptoUtil.formatBytes(prev.compressedSize)}" else "Uncompressed binary",
+                                        color = Slate400,
+                                        fontSize = 10.sp
+                                    )
+                                }
+                            }
+                            if (prev.wasCompressed) {
+                                Surface(
+                                    shape = RoundedCornerShape(4.dp),
+                                    color = Purple400.copy(alpha = 0.2f),
+                                    border = BorderStroke(1.dp, Purple400.copy(alpha = 0.5f))
+                                ) {
+                                    Text(
+                                        "-${prev.savingsPercent}% Size",
+                                        color = Purple400,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 10.sp,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(6.dp))
+
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -652,8 +771,8 @@ fun SenderScreen(
                             modifier = Modifier.weight(1f)
                         ) {
                             Column(modifier = Modifier.padding(8.dp)) {
-                                Text("Payload Size", color = Slate400, fontSize = 10.sp)
-                                Text(CryptoUtil.formatBytes(prev.size), color = Slate100, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                                Text("Transfer Chunks", color = Slate400, fontSize = 10.sp)
+                                Text("${prev.estChunks} chunks", color = Slate100, fontWeight = FontWeight.Bold, fontSize = 12.sp)
                             }
                         }
                         Surface(
@@ -664,7 +783,7 @@ fun SenderScreen(
                         ) {
                             Column(modifier = Modifier.padding(8.dp)) {
                                 Text("Est. Duration", color = Slate400, fontSize = 10.sp)
-                                Text("~${prev.estDurationSec}s (${prev.estChunks} chunks)", color = Purple400, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                                Text("~${prev.estDurationSec}s @ $effectiveFps FPS", color = Purple400, fontWeight = FontWeight.Bold, fontSize = 12.sp)
                             }
                         }
                     }
@@ -716,6 +835,28 @@ fun SenderScreen(
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Column(modifier = Modifier.padding(12.dp)) {
+                    // Compression Switch
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column {
+                            Text("GZIP/ZLIB Compression", fontWeight = FontWeight.SemiBold, color = Slate100, fontSize = 12.sp)
+                            Text("Compress text & data before optical segmenting", color = Slate400, fontSize = 10.sp)
+                        }
+                        Switch(
+                            checked = config.useCompression,
+                            onCheckedChange = {
+                                config = config.copy(useCompression = it)
+                                pendingPreview?.let { prev -> inspectFile(prev.name, prev.size, prev.type, prev.rawBytes, false) }
+                            },
+                            colors = SwitchDefaults.colors(checkedThumbColor = Cyan400, checkedTrackColor = Cyan900)
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
                     Text("Fine-Tune FPS", style = MaterialTheme.typography.bodySmall.copy(color = Slate400))
                     Slider(
                         value = config.fps.toFloat(),
